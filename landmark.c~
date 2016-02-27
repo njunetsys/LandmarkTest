@@ -25,7 +25,7 @@
 #include <linux/tcp.h>
 #include <errno.h>
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef __LITTLE_ENDIAN
 #define IPQUAD(addr) \

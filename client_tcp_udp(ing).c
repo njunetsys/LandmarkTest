@@ -1,6 +1,6 @@
 /* ========================================================
  *   Copyright (C) 2015 All rights reserved.
- *   
+ *
  *   filename : client.c
  *   author   : zhangxiao@dislab.nju.edu.cn
  *   date     : 2015-3-30
@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <ifaddrs.h>
+#include <udp.h>
 
 #include <asm/byteorder.h>
 #include <linux/netfilter.h>
@@ -42,6 +43,8 @@
 #endif
 
 #define MAXLEN 2048
+#define TCP 6
+#define TCP 17
 int sockfd = 0;
 int is_failure = 1;
 int is_send = 1;
@@ -51,6 +54,8 @@ struct hostent *hent;
 struct ifaddrs* ifAddr=NULL;
 char* landmarkfile = "landmark.txt";
 uint32_t landmark;
+
+uint32_t destinationAddress = 0;
 
 uint32_t get_landmark(){
 	FILE *fp;
@@ -64,7 +69,7 @@ uint32_t get_landmark(){
 	fclose(fp);
 	fprintf(stderr,"The landmark ip is %s", landmarkip);
 	return inet_addr(landmarkip);
-	
+
 }
 
 u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_addr[], u_int16_t buff[])
@@ -73,18 +78,18 @@ u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_a
     u_int32_t sum = 0 ;
     int nleft = len_tcp;
     u_int16_t *w = buff;
- 
+
     /* calculate the checksum for the tcp header and payload */
     while(nleft > 1)
     {
         sum += *w++;
         nleft -= 2;
     }
- 
+
     /* if nleft is 1 there ist still on byte left. We add a padding byte (0xFF) to build a 16bit word */
     if(nleft>0)
 		sum += *w&ntohs(0xFF00);   /* Thanks to Dalton */
- 
+
     /* add the pseudo header */
     sum += src_addr[0];
     sum += src_addr[1];
@@ -92,14 +97,14 @@ u_int16_t tcp_sum_calc(u_int16_t len_tcp, u_int16_t src_addr[], u_int16_t dest_a
     sum += dest_addr[1];
     sum += htons(len_tcp);
     sum += htons(prot_tcp);
- 
+
     // keep only the last 16 bits of the 32 bit calculated sum and add the carries
     sum = (sum >> 16) + (sum & 0xFFFF);
     sum += (sum >> 16);
- 
+
     // Take the one's complement of sum
     sum = ~sum;
- 
+
     return ((u_int16_t) sum);
 }
 
@@ -112,7 +117,7 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
     sour_addr = ip->saddr;
     dest_addr = ip->daddr;
 
-	
+
 
 	//determine whether the packet is sent by raw socket or not
 	unsigned char* addrinfo = pkt + ip->ihl*4;
@@ -125,7 +130,7 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
 		}
 	}
 	 printf("raw packet tcp src port is %d, dest port is %d\n", ntohs(tcph->source),ntohs(tcph->dest));
-	
+
 	#ifdef DEBUG
 	fprintf(stderr,"len %d iphdr %d %u.%u.%u.%u ->",
     	pkt_len,
@@ -135,12 +140,12 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
         IPQUAD(ip->daddr));
   	fprintf(stderr,"\n");
 	#endif
-	
+
     unsigned char buf[MAXLEN + 10];
-    
+
     unsigned char* nip_payload;
 
-    
+
     struct sockaddr_in to;
 
     // copy ip header to new packet
@@ -168,7 +173,7 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
     nip->daddr = landmark;
     to.sin_addr.s_addr = landmark;
     to.sin_family = AF_INET;
-    
+
     #ifdef DEBUG
     struct tcphdr* ntcph = (struct tcphdr*)(buf+ip->ihl*4+2*sizeof(uint32_t));
     printf("received tcp src port is %d, dest port is %d\n", ntohs(ntcph->source),ntohs(ntcph->dest));
@@ -177,7 +182,7 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
     printf("destination ip is %s\tlen is %d\n",inet_ntoa(dst), npkt_len);
     printf("IP id is %d\n", ip->id);
     #endif
-    
+
     int r = sendto(sockfd, buf,npkt_len,0, (struct sockaddr *)&to, sizeof(to));
     nfq_set_verdict(qh, id, NF_DROP, (u_int32_t)pkt_len, pkt);
     if(r < 0){
@@ -189,7 +194,23 @@ void process_send_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_ha
 
 void process_receive_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q_handle* qh){
     struct iphdr *ip = (struct iphdr*) pkt;
-    
+
+    uint32_t dst_addr = ip->daddr;
+    //determine whether the packet is received from landmark
+	unsigned char* addrinfo = pkt + ip->ihl*4;
+	if(pkt_len > ip->ihl*4 + 2*sizeof(u_int32_t)){
+		uint32_t test_sour_addr = *((uint32_t*)addrinfo);
+		uint32_t test_dst_addr = *((uint32_t*)(addrinfo + sizeof(u_int32_t)));
+		if(test_dst_addr == 0 || test_dst_addr != dst_addr){
+			nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t)pkt_len, pkt);
+			return;
+		}
+	}
+	else{
+		nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t)pkt_len, pkt);
+		return;
+	}
+
     #ifdef DEBUG
     fprintf(stderr, "receive a packet\n");
 	fprintf(stderr,"len %d iphdr %d %u.%u.%u.%u ->",
@@ -200,25 +221,33 @@ void process_receive_packet(unsigned char* pkt, int pkt_len, int id,struct nfq_q
         IPQUAD(ip->daddr));
   	fprintf(stderr,"\n");
 	#endif
-	
-    /*unsigned char* tcp_packet = pkt + ip->ihl*4 + 2*sizeof(u_int32_t);
+
+	uint32_t conn_src_addr = *(uint32_t*)(pkt+ip->ihl*4);
+    unsigned char* tcp_packet = pkt + ip->ihl*4 + 2*sizeof(u_int32_t);
     struct tcphdr* tcph = (struct tcphdr*)tcp_packet;
     unsigned char* ntcp_packet = pkt + ip->ihl*4;
     u_int32_t tcp_len = pkt_len - ip->ihl*4 - 2*sizeof(u_int32_t);
     memcpy((void*)ntcp_packet, (void*)tcp_packet,(size_t )tcp_len);
     struct tcphdr* ntcph = (struct tcphdr*)ntcp_packet;
-    
-    
-    
+
+    ip->saddr = conn_src_addr;
+
+
     u_int32_t pdata_len = pkt_len - 2*sizeof(u_int32_t);
     ip->tot_len = htons(pdata_len);
 	#ifdef DEBUG
 	printf("reveived ip check is %d\n",ip->check);
 	  printf("received tcp src port is %d, dest port is %d\n", ntohs(ntcph->source),ntohs(ntcph->dest));
+	  fprintf(stderr,"conninfo: %u.%u.%u.%u ->",
+        IPQUAD(ip->saddr));
+  	fprintf(stderr," %u.%u.%u.%u",
+        IPQUAD(ip->daddr));
+  	fprintf(stderr,"\n");
+  	 fprintf(stderr, "received packet processed\n");
 	#endif
-	//ip->check = 0;*/
-    nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t)pkt_len, pkt);
-    fprintf(stderr, "received packet processed\n");
+	//ip->check = 0;
+    nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t)pdata_len, pkt);
+
 
 
 }
@@ -236,7 +265,7 @@ static int cb(struct nfq_q_handle* qh, struct nfgenmsg* nfmsg, struct nfq_data* 
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0 ,NULL);
     }
 
-	
+
 
     pdata_len = nfq_get_payload(nfa, (unsigned char**)&pdata);
     if(pdata_len == -1){
@@ -246,37 +275,38 @@ static int cb(struct nfq_q_handle* qh, struct nfgenmsg* nfmsg, struct nfq_data* 
     struct iphdr* iphdrp = (struct iphdr*)pdata;
 
     #ifdef DEBUG
-    uint32_t dstaddr = inet_addr("114.212.84.201");
-    uint32_t srcaddr = inet_addr("114.212.82.165");
-	
-	if((iphdrp->daddr == dstaddr && iphdrp->saddr == srcaddr) || (iphdrp->saddr == dstaddr && iphdrp->daddr == srcaddr)){
+    /*uint32_t srcaddr = inet_addr("114.212.84.201");
+    uint32_t dstaddr1 = inet_addr("114.212.82.165");
+    uint32_t dstaddr2 = inet_addr("114.212.82.140");
+
+	if((iphdrp->daddr == dstaddr1 || iphdrp->saddr == dstaddr2)){
 	}
 	else{
 		nfq_set_verdict(qh, id, NF_ACCEPT, (u_int32_t)pdata_len, pdata);
 		return 0;
-	}
-	
-	
-	uint32_t loaddr = inet_addr("127.0.0.1");	
+	}*/
+	 #endif
+
+	uint32_t loaddr = inet_addr("127.0.0.1");
 	if(iphdrp->saddr == loaddr || iphdrp->daddr == loaddr){
 		return 0;
 	}
-    
-    
-    #endif
+
+
+
 
     //***********determine whether the packet is sent or received**********
     struct ifaddrs* iaddr = ifAddr;
     while(iaddr!=NULL){
-			
+
 		if(iaddr->ifa_addr->sa_family != AF_INET){
 			iaddr = iaddr->ifa_next;
 			continue;
 		}
-		
-		
+
+
 		u_int32_t addr = (u_int32_t)(((struct sockaddr_in*)iaddr->ifa_addr)->sin_addr.s_addr);
-		
+
 		if(addr == (u_int32_t)iphdrp->saddr){
 			is_send = 1;
 			#ifdef DEBUG
@@ -291,16 +321,17 @@ static int cb(struct nfq_q_handle* qh, struct nfgenmsg* nfmsg, struct nfq_data* 
 			#endif
 			break;
 		}
-		iaddr = iaddr->ifa_next;		
-		
+		iaddr = iaddr->ifa_next;
+
 	}
     //*********************************************************************
     if(is_send){
-        process_send_packet(pdata,pdata_len,id,qh);
-        
+        if(iphdrp->protocol == TCP)
+        process_send_packet_tcp(pdata,pdata_len,id,qh);
+
     }
     else{
-        process_receive_packet(pdata, pdata_len, id, qh);
+        process_receive_packet_tcp(pdata, pdata_len, id, qh);
     }
 
 
@@ -338,7 +369,7 @@ int main(int argc, char** argv){
 	}
 	printf("\n");
     #endif
-    
+
     landmark = get_landmark();
 
 
@@ -376,7 +407,7 @@ int main(int argc, char** argv){
         exit(1);
     }
 
-	
+
     fd = nfq_fd(h);
     while(1){
         rv = recv(fd, buf, sizeof(buf), 0);
@@ -384,7 +415,7 @@ int main(int argc, char** argv){
 			//printf("packet received\n");
 			nfq_handle_packet(h, buf,rv);
 		}
-           
+
         else{
             fprintf(stderr, "recv got %d, errno = %d\n",rv, errno);
             break;
